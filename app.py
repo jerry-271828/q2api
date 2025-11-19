@@ -128,9 +128,23 @@ async def _init_global_client():
                 "https://": httpx.AsyncHTTPTransport(proxy=proxy_url),
                 "http://": httpx.AsyncHTTPTransport(proxy=proxy_url),
             }
-    # Increased limits for high concurrency
-    limits = httpx.Limits(max_keepalive_connections=100, max_connections=200)
-    GLOBAL_CLIENT = httpx.AsyncClient(mounts=mounts, timeout=60.0, limits=limits)
+    # Increased limits for high concurrency with streaming
+    # max_connections: 总连接数上限
+    # max_keepalive_connections: 保持活跃的连接数
+    # keepalive_expiry: 连接保持时间
+    limits = httpx.Limits(
+        max_keepalive_connections=60,
+        max_connections=60,  # 提高到500以支持更高并发
+        keepalive_expiry=30.0  # 30秒后释放空闲连接
+    )
+    # 为流式响应设置更长的超时
+    timeout = httpx.Timeout(
+        connect=1.0,  # 连接超时
+        read=300.0,    # 读取超时(流式响应需要更长时间)
+        write=1.0,    # 写入超时
+        pool=1.0      # 从连接池获取连接的超时时间(关键!)
+    )
+    GLOBAL_CLIENT = httpx.AsyncClient(mounts=mounts, timeout=timeout, limits=limits)
 
 async def _close_global_client():
     global GLOBAL_CLIENT
