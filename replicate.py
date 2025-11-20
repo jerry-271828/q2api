@@ -310,13 +310,17 @@ async def send_chat_request(
                                 if ":event-type" in ev_headers:
                                     event_type = ev_headers[":event-type"]
                                 yield (event_type, parsed)
+            except GeneratorExit:
+                # Client disconnected - ensure cleanup without re-raising
+                pass
             except Exception:
                 if not tracker.has_content:
                     raise
             finally:
                 response_consumed = True
-                await resp.aclose()
-                if local_client:
+                if resp and not resp.is_closed:
+                    await resp.aclose()
+                if local_client and client:
                     await client.aclose()
 
         async def _iter_text() -> AsyncGenerator[str, None]:
@@ -328,67 +332,11 @@ async def send_chat_request(
         if stream:
             # If raw_payload is used, we might want the raw event stream
             if raw_payload:
-                # Wrap generator to ensure cleanup on early termination
-                async def _safe_iter_events():
-                    try:
-                        # 托底方案: 300秒强制超时
-                        async with asyncio.timeout(300):
-                            async for item in _iter_events():
-                                yield item
-                    except asyncio.TimeoutError:
-                        # 超时强制关闭
-                        if resp and not resp.is_closed:
-                            await resp.aclose()
-                        if local_client and client:
-                            await client.aclose()
-                        raise
-                    except GeneratorExit:
-                        # Generator was closed without being fully consumed
-                        # Ensure cleanup happens even if finally block wasn't reached
-                        if resp and not resp.is_closed:
-                            await resp.aclose()
-                        if local_client and client:
-                            await client.aclose()
-                        raise
-                    except Exception:
-                        # Any exception should also trigger cleanup
-                        if resp and not resp.is_closed:
-                            await resp.aclose()
-                        if local_client and client:
-                            await client.aclose()
-                        raise
-                return None, None, tracker, _safe_iter_events()
+                # Return event stream directly - cleanup handled by _iter_events
+                return None, None, tracker, _iter_events()
             
-            # Wrap text generator to ensure cleanup on early termination
-            async def _safe_iter_text():
-                try:
-                    # 托底方案: 300秒强制超时
-                    async with asyncio.timeout(300):
-                        async for item in tracker.track(_iter_text()):
-                            yield item
-                except asyncio.TimeoutError:
-                    # 超时强制关闭
-                    if resp and not resp.is_closed:
-                        await resp.aclose()
-                    if local_client and client:
-                        await client.aclose()
-                    raise
-                except GeneratorExit:
-                    # Generator was closed without being fully consumed
-                    # Ensure cleanup happens even if finally block wasn't reached
-                    if resp and not resp.is_closed:
-                        await resp.aclose()
-                    if local_client and client:
-                        await client.aclose()
-                    raise
-                except Exception:
-                    # Any exception should also trigger cleanup
-                    if resp and not resp.is_closed:
-                        await resp.aclose()
-                    if local_client and client:
-                        await client.aclose()
-                    raise
-            return None, _safe_iter_text(), tracker, None
+            # Return text stream directly - cleanup handled by _iter_events
+            return None, tracker.track(_iter_text()), tracker, None
         else:
             buf = []
             try:

@@ -564,6 +564,7 @@ async def claude_messages(req: ClaudeRequest, account: Dict[str, Any] = Depends(
     # Re-implementing logic to be cleaner
     
     # Always stream from upstream to get full event details
+    event_iter = None
     try:
         access = account.get("accessToken")
         if not access:
@@ -598,9 +599,8 @@ async def claude_messages(req: ClaudeRequest, account: Dict[str, Any] = Depends(
                     yield sse
                 await _update_stats(account["id"], True)
             except GeneratorExit:
-                # Client disconnected, ensure cleanup happens in replicate.py's finally block
+                # Client disconnected - update stats but don't re-raise
                 await _update_stats(account["id"], tracker.has_content if tracker else False)
-                raise
             except Exception:
                 await _update_stats(account["id"], False)
                 raise
@@ -679,6 +679,12 @@ async def claude_messages(req: ClaudeRequest, account: Dict[str, Any] = Depends(
             }
 
     except Exception as e:
+        # Ensure event_iter (if created) is closed to release upstream connection
+        try:
+            if event_iter and hasattr(event_iter, "aclose"):
+                await event_iter.aclose()
+        except Exception:
+            pass
         await _update_stats(account["id"], False)
         raise
 
@@ -719,6 +725,7 @@ async def chat_completions(req: ChatCompletionRequest, account: Dict[str, Any] =
         stream_id = f"chatcmpl-{uuid.uuid4()}"
         model_used = model or "unknown"
         
+        it = None
         try:
             _, it, tracker = await _send_upstream(stream=True)
             assert it is not None
@@ -762,15 +769,20 @@ async def chat_completions(req: ChatCompletionRequest, account: Dict[str, Any] =
                     yield "data: [DONE]\n\n"
                     await _update_stats(account["id"], True)
                 except GeneratorExit:
-                    # Client disconnected, ensure cleanup happens in replicate.py's finally block
+                    # Client disconnected - update stats but don't re-raise
                     await _update_stats(account["id"], tracker.has_content if tracker else False)
-                    raise
                 except Exception:
                     await _update_stats(account["id"], tracker.has_content if tracker else False)
                     raise
             
             return StreamingResponse(event_gen(), media_type="text/event-stream")
         except Exception as e:
+            # Ensure iterator (if created) is closed to release upstream connection
+            try:
+                if it and hasattr(it, "aclose"):
+                    await it.aclose()
+            except Exception:
+                pass
             await _update_stats(account["id"], False)
             raise
 
