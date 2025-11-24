@@ -719,55 +719,76 @@ async def claude_messages(req: ClaudeRequest, account: Dict[str, Any] = Depends(
             # Let's implement a basic accumulator from the SSE stream
             final_content = []
             
-            async for sse_line in event_generator():
-                # print(sse_line)
-                if sse_line.startswith("data: "):
-                    data_str = sse_line[6:].strip()
-                    if data_str == "[DONE]": continue
-                    try:
-                        data = json.loads(data_str)
-                        dtype = data.get("type")
-                        if dtype == "content_block_start":
-                            idx = data.get("index", 0)
-                            while len(final_content) <= idx:
-                                final_content.append(None)
-                            final_content[idx] = data.get("content_block")
-                        elif dtype == "content_block_delta":
-                            idx = data.get("index", 0)
-                            delta = data.get("delta", {})
-                            if final_content[idx]:
-                                if delta.get("type") == "text_delta":
-                                    final_content[idx]["text"] += delta.get("text", "")
-                                elif delta.get("type") == "input_json_delta":
-                                    # We need to accumulate partial json
-                                    # But wait, content_block for tool_use has 'input' as dict?
-                                    # No, in start it is empty.
-                                    # We need to track partial json string
-                                    if "partial_json" not in final_content[idx]:
-                                        final_content[idx]["partial_json"] = ""
-                                    final_content[idx]["partial_json"] += delta.get("partial_json", "")
-                        elif dtype == "content_block_stop":
-                            idx = data.get("index", 0)
-                            # If tool use, parse json
-                            if final_content[idx] and final_content[idx]["type"] == "tool_use":
-                                if "partial_json" in final_content[idx]:
-                                    try:
-                                        final_content[idx]["input"] = json.loads(final_content[idx]["partial_json"])
-                                    except:
-                                        pass
-                                    del final_content[idx]["partial_json"]
-                        elif dtype == "message_delta":
-                            usage = data.get("usage", usage)
-                            stop_reason = data.get("delta", {}).get("stop_reason")
-                    except:
-                        pass
-            
+            async for sse_chunk in event_generator():
+                data_str = None
+                # Each chunk from the generator can have multiple lines ('event:', 'data:').
+                # We need to find the 'data:' line.
+                for line in sse_chunk.strip().split('\n'):
+                    if line.startswith("data:"):
+                        data_str = line[6:].strip()
+                        break
+                
+                if not data_str or data_str == "[DONE]":
+                    continue
+                
+                try:
+                    data = json.loads(data_str)
+                    dtype = data.get("type")
+                    
+                    if dtype == "content_block_start":
+                        idx = data.get("index", 0)
+                        while len(final_content) <= idx:
+                            final_content.append(None)
+                        final_content[idx] = data.get("content_block")
+                    
+                    elif dtype == "content_block_delta":
+                        idx = data.get("index", 0)
+                        delta = data.get("delta", {})
+                        if final_content[idx]:
+                            if delta.get("type") == "text_delta":
+                                final_content[idx]["text"] += delta.get("text", "")
+                            elif delta.get("type") == "input_json_delta":
+                                if "partial_json" not in final_content[idx]:
+                                    final_content[idx]["partial_json"] = ""
+                                final_content[idx]["partial_json"] += delta.get("partial_json", "")
+                    
+                    elif dtype == "content_block_stop":
+                        idx = data.get("index", 0)
+                        if final_content[idx] and final_content[idx].get("type") == "tool_use":
+                            if "partial_json" in final_content[idx]:
+                                try:
+                                    final_content[idx]["input"] = json.loads(final_content[idx]["partial_json"])
+                                except json.JSONDecodeError:
+                                    # Keep partial if invalid
+                                    final_content[idx]["input"] = {"error": "invalid json", "partial": final_content[idx]["partial_json"]}
+                                del final_content[idx]["partial_json"]
+                    
+                    elif dtype == "message_delta":
+                        usage = data.get("usage", usage)
+                        stop_reason = data.get("delta", {}).get("stop_reason")
+                
+                except json.JSONDecodeError:
+                    # Ignore lines that are not valid JSON
+                    pass
+                except Exception:
+                    # Broad exception to prevent accumulator from crashing on one bad event
+                    traceback.print_exc()
+                    pass
+
+            # Final assembly
+            final_content_cleaned = []
+            for c in final_content:
+                if c is not None:
+                    # Remove internal state like 'partial_json' before returning
+                    c.pop("partial_json", None)
+                    final_content_cleaned.append(c)
+
             return JSONResponse(content={
                 "id": f"msg_{uuid.uuid4()}",
                 "type": "message",
                 "role": "assistant",
                 "model": req.model,
-                "content": [c for c in final_content if c is not None],
+                "content": final_content_cleaned,
                 "stop_reason": stop_reason,
                 "stop_sequence": None,
                 "usage": usage
