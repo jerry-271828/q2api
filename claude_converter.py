@@ -78,16 +78,16 @@ def map_model_name(claude_model: str) -> str:
     """
     DEFAULT_MODEL = "claude-sonnet-4.5"
 
-    # Available models in the service (Amazon Q only supports these)
-    VALID_MODELS = {"auto", "claude-sonnet-4", "claude-sonnet-4.5", "claude-haiku-4.5"}
+    # Available models in the service (with KIRO_CLI origin)
+    VALID_MODELS = {"auto", "claude-sonnet-4", "claude-sonnet-4.5", "claude-haiku-4.5", "claude-opus-4.5"}
 
     # Mapping from canonical names to short names
     CANONICAL_TO_SHORT = {
         "claude-sonnet-4-20250514": "claude-sonnet-4",
         "claude-sonnet-4-5-20250929": "claude-sonnet-4.5",
         "claude-haiku-4-5-20251001": "claude-haiku-4.5",
-        # Amazon Q doesn't support Opus - map to Sonnet 4.5 (best available model)
-        "claude-opus-4-5-20251101": "claude-sonnet-4.5",
+        # Amazon Q supports Opus with KIRO_CLI origin
+        "claude-opus-4-5-20251101": "claude-opus-4.5",
         # Legacy Claude 3.5 Sonnet models
         "claude-3-5-sonnet-20241022": "claude-sonnet-4.5",
         "claude-3-5-sonnet-20240620": "claude-sonnet-4.5",
