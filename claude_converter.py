@@ -322,15 +322,50 @@ def merge_user_messages(messages: List[Dict[str, Any]], hint: str = THINKING_HIN
 
     return result
 
+def _reorder_tool_results_by_tool_uses(tool_results: List[Dict[str, Any]], tool_use_order: List[str]) -> List[Dict[str, Any]]:
+    """Reorder tool_results to match the order of tool_uses from the preceding assistant message.
+
+    This is critical for preventing model confusion when parallel tool calls return results
+    in a different order than they were called.
+
+    Args:
+        tool_results: List of tool_result dicts with toolUseId
+        tool_use_order: List of toolUseIds in the order they appeared in the assistant message
+
+    Returns:
+        Reordered list of tool_results
+    """
+    if not tool_use_order or not tool_results:
+        return tool_results
+
+    result_by_id = {r["toolUseId"]: r for r in tool_results}
+    ordered_results = []
+
+    # Add results in the order of tool_uses
+    for tool_use_id in tool_use_order:
+        if tool_use_id in result_by_id:
+            ordered_results.append(result_by_id.pop(tool_use_id))
+
+    # Add any remaining results not in the original order (shouldn't happen normally)
+    ordered_results.extend(result_by_id.values())
+
+    return ordered_results
+
+
 def process_history(messages: List[ClaudeMessage], thinking_enabled: bool = False, hint: str = THINKING_HINT) -> List[Dict[str, Any]]:
     """Process history messages to match Amazon Q format (alternating user/assistant).
 
     Dual-mode detection:
     - If messages already alternate correctly (no consecutive user/assistant), skip merging
     - If messages have consecutive same-role messages, apply merge logic
+
+    Key fix: Track tool_use order from assistant messages and reorder tool_results in user
+    messages to match. This prevents model confusion when parallel tool calls return results
+    in a different order than they were called.
     """
     history = []
     seen_tool_use_ids = set()  # Track tool_use IDs in assistant messages
+    last_tool_use_order = []  # Track order of tool_uses from the last assistant message
 
     raw_history = []
 
@@ -369,10 +404,15 @@ def process_history(messages: List[ClaudeMessage], thinking_enabled: bool = Fals
                 text_content = "\n".join(text_parts)
             else:
                 text_content = extract_text_from_content(content)
-            
+
             if should_append_hint:
                 text_content = _append_thinking_hint(text_content, hint)
-            
+
+            # Reorder tool_results to match the order of tool_uses from the preceding assistant message
+            if tool_results and last_tool_use_order:
+                tool_results = _reorder_tool_results_by_tool_uses(tool_results, last_tool_use_order)
+                logger.info(f"Reordered {len(tool_results)} tool_results to match tool_uses order")
+
             user_ctx = {
                 "envState": {
                     "operatingSystem": "macos",
@@ -389,20 +429,22 @@ def process_history(messages: List[ClaudeMessage], thinking_enabled: bool = Fals
             }
             if images:
                 u_msg["images"] = images
-                
+
             raw_history.append({"userInputMessage": u_msg})
-            
+
         elif msg.role == "assistant":
             content = msg.content
             text_content = extract_text_from_content(content)
-            
+
             entry = {
                 "assistantResponseMessage": {
                     "messageId": str(uuid.uuid4()),
                     "content": text_content
                 }
             }
-            
+
+            # Track tool_use order for reordering tool_results in the next user message
+            last_tool_use_order = []
             if isinstance(content, list):
                 tool_uses = []
                 for block in content:
@@ -410,6 +452,7 @@ def process_history(messages: List[ClaudeMessage], thinking_enabled: bool = Fals
                         tid = block.get("id")
                         if tid and tid not in seen_tool_use_ids:
                             seen_tool_use_ids.add(tid)
+                            last_tool_use_order.append(tid)  # Track order
                             tool_uses.append({
                                 "toolUseId": tid,
                                 "name": block.get("name"),
@@ -417,7 +460,7 @@ def process_history(messages: List[ClaudeMessage], thinking_enabled: bool = Fals
                             })
                 if tool_uses:
                     entry["assistantResponseMessage"]["toolUses"] = tool_uses
-            
+
             raw_history.append(entry)
 
     # Dual-mode detection: check if messages already alternate correctly
@@ -588,6 +631,26 @@ def convert_claude_to_amazonq_request(req: ClaudeRequest, conversation_id: Optio
             prompt_content = "\n".join(text_parts)
         else:
             prompt_content = extract_text_from_content(content)
+
+    # Get tool_use order from the last assistant message for reordering current message's tool_results
+    last_tool_use_order = []
+    if len(req.messages) >= 2:
+        # Find the last assistant message before the current user message
+        for i in range(len(req.messages) - 2, -1, -1):
+            if req.messages[i].role == "assistant":
+                assistant_content = req.messages[i].content
+                if isinstance(assistant_content, list):
+                    for block in assistant_content:
+                        if isinstance(block, dict) and block.get("type") == "tool_use":
+                            tid = block.get("id")
+                            if tid:
+                                last_tool_use_order.append(tid)
+                break
+
+    # Reorder tool_results to match the order of tool_uses from the preceding assistant message
+    if tool_results and last_tool_use_order:
+        tool_results = _reorder_tool_results_by_tool_uses(tool_results, last_tool_use_order)
+        logger.info(f"Reordered {len(tool_results)} current message tool_results to match tool_uses order")
 
     # 3. Context
     user_ctx = {
